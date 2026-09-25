@@ -1,0 +1,8 @@
+.venv/
+work/
+output/*.parquet
+student_resource/dataset/
+*_submission.zip
+__pycache__/
+*.pyc
+.DS_Store
