@@ -1,6 +1,7 @@
 #!/bin/bash
 # SLURM job for PARAM Ganga (IIT Roorkee): full pipeline on one high-memory node
-# (2x Xeon 8268 = 48 cores, 768 GB RAM). Submit from code/business_entity_resolution:
+# (2x Xeon 8268 = 48 cores, 768 GB RAM). If sinfo lists the partition as "hm", change it below.
+# Submit from code/business_entity_resolution:
 #     sbatch run_paramganga.sbatch
 #SBATCH --job-name=er_v2
 #SBATCH --partition=highmemory

@@ -6,3 +6,4 @@ student_resource/dataset/
 __pycache__/
 *.pyc
 .DS_Store
+submissions/
