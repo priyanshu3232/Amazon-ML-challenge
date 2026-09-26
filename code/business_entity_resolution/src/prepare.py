@@ -31,12 +31,21 @@ def _norm_addrs(chunk):
     return [normalize_address(a, c) for a, c in chunk]
 
 
+_TRANSLIT = {}   # learned dict, handed to worker processes by _parallel
+
+
+def _init_worker(d):
+    set_translit_dict(d)
+
+
 def _parallel(fn, items, n):
     if len(items) < 20000 or n <= 1:
         return fn(items)
     chunks = [items[i::n] for i in range(n)]
-    ctx = mp.get_context("fork")
-    with ctx.Pool(n) as pool:
+    # "spawn" exists on every OS (Windows has no fork). Spawned workers do not
+    # inherit module globals, so each one re-installs the transliteration dict.
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(n, initializer=_init_worker, initargs=(_TRANSLIT,)) as pool:
         parts = pool.map(fn, chunks)
     out = [None] * len(items)
     for i, part in enumerate(parts):
@@ -86,6 +95,8 @@ def main():
         d = load_translit(TRANSLIT_PATH)
         print(f"loaded transliteration dictionary: {len(d):,} tokens")
     set_translit_dict(d)
+    global _TRANSLIT
+    _TRANSLIT = d
 
     for name, df in (("s1", s1), ("pool", pool)):
         print(f"normalizing {name} ...")

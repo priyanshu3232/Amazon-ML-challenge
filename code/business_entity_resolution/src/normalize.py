@@ -46,6 +46,7 @@ DOMAIN_RE = re.compile(
 )
 DOTTED_ABBR_RE = re.compile(r"\b((?:[a-z]\.){1,}[a-z]?)\.?(?=\s|$|[^a-z])")
 ORDINAL_RE = re.compile(r"\b(\d+)(?:st|nd|rd|th)\b")
+LEADING_ZERO_RE = re.compile(r"\b0+(?=\d)")   # zero-padded house/plot numbers
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 ZW_RE = re.compile("[​‌‍﻿]")
 
@@ -142,7 +143,7 @@ GENERIC_ADDR = {
     "street": "st", "avenue": "ave", "road": "rd", "boulevard": "blvd",
     "floor": "fl", "building": "bldg", "apartment": "apt",
 }
-ADDR_DROP = {"no", "number", "num", "h", "hno", "null", "none", "nil",
+ADDR_DROP = {"no", "number", "num", "ndeg", "h", "hno", "null", "none", "nil",
              "de", "du", "des", "la", "le", "les", "l", "d", "of", "the",
              "at", "in", "and", "et"}
 ADDR_PHRASES = {"h no": " ", "h.no": " ", "house no": " ", "door no": " ",
@@ -289,6 +290,7 @@ def normalize_address(raw: str, country: str) -> str:
     # punctuation-bearing fillers first (n/a, h.no, p.o. box ...)
     s = _ADDR_PHRASE_RE.sub(lambda m: " " + ADDR_PHRASES[m.group(0)] + " ", s)
     s = NON_ALNUM_RE.sub(" ", s)
+    s = LEADING_ZERO_RE.sub("", s)
     pr = _phrase_re(key)
     merged = {**phrases, **ADDR_PHRASES}
     s = pr.sub(lambda m: " " + merged.get(m.group(0), m.group(0)) + " ", s)
