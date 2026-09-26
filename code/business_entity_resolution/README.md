@@ -99,3 +99,30 @@ transliteration dictionary is learned only from `train_ground_truth.tsv`.
 `.gitattributes` forces LF line endings, so a checkout made on Windows can be
 copied to a Linux cluster as is. On Windows use `py -3.12 -m venv .venv` and
 `.\.venv\Scripts\Activate.ps1` in place of the `source` line.
+
+## Splitting the test prediction across machines
+
+`predict.py` scores one country at a time and the countries are independent
+(the one-parent rule only competes within a country), so the ~2.5 h scoring
+step can be split by country. Every machine needs the same commit of this
+repo, the dataset, `work/translit_dict.json` (in git), the trained model
+files `work/model_*<tag>*` (in git once trained), and ideally the blocking
+caches `work/cands_cache/` + `work/rev_cache/` copied from the machine that
+produced them (otherwise blocking is recomputed, ~20-45 min per country).
+
+```bash
+python prepare.py --split test                              # once per machine, ~3 min
+# machine A                                                  # machine B
+python predict.py --tag _v2 --countries India \              python predict.py --tag _v2 --countries US,France \
+    --out-suffix _india                                          --out-suffix _usfr
+```
+
+Copy the partial `output/*_<suffix>.tsv` files onto one machine and merge:
+
+```bash
+python merge_outputs.py --suffixes _india _usfr     # writes output/{matching_results,candidate_pairs}.tsv and validates
+```
+
+Rough per-country scoring times from the caches on a 10-core laptop: India
+85 min, US 35 min, France 15 min. Training does not split (it is ~40 min with
+the caches), so two machines cut a full cycle from ~3 h to ~2 h.

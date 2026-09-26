@@ -85,7 +85,13 @@ def main():
     ap.add_argument("--unseen-thr-bump", type=float, default=None,
                     help="threshold increase for countries absent from training")
     ap.add_argument("--no-cands-cache", action="store_true")
+    ap.add_argument("--countries", default="",
+                    help="comma-separated subset of countries to score (for splitting the test set "
+                         "across machines); the partial outputs are merged with merge_outputs.py")
+    ap.add_argument("--out-suffix", default="",
+                    help="suffix for the output file names, e.g. _india -> matching_results_india.tsv")
     args = ap.parse_args()
+    countries = [c.strip() for c in args.countries.split(",") if c.strip()]
 
     with open(C.WORK_DIR / f"model_meta{args.tag}.json") as fh:
         meta = json.load(fh)
@@ -104,6 +110,9 @@ def main():
     if args.limit:
         limit_mask[args.limit:] = False
         out_dir = C.WORK_DIR / "smoke"
+    if countries:
+        limit_mask &= np.isin(s1.country.values, countries)
+        log(f"scoring only {countries}: {int(limit_mask.sum()):,} entities")
     out_dir.mkdir(parents=True, exist_ok=True)
     s1_ids = s1.entity_id.values.astype(object)
     pool_ids = pool.entity_id.values.astype(object)
@@ -112,8 +121,9 @@ def main():
 
     cache_dir = C.WORK_DIR / "cands_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    f_c = open(out_dir / "candidate_pairs.tsv", "w", encoding="utf-8", newline="\n")
-    f_m = open(out_dir / "matching_results.tsv", "w", encoding="utf-8", newline="\n")
+    sfx = args.out_suffix
+    f_c = open(out_dir / f"candidate_pairs{sfx}.tsv", "w", encoding="utf-8", newline="\n")
+    f_m = open(out_dir / f"matching_results{sfx}.tsv", "w", encoding="utf-8", newline="\n")
     f_c.write("source1_entity_id\tcandidate_entity_ids\n")
     f_m.write("source1_entity_id\tmatched_entity_ids\n")
     tot_pairs = tot_matches = tot_nonempty = 0
@@ -186,10 +196,10 @@ def main():
     log(f"done: {n_ent:,} entities, {tot_pairs:,} candidates, {tot_matches:,} matches, "
         f"{tot_nonempty:,} non-empty ({tot_nonempty/max(1,n_ent):.3f})")
 
-    if not args.limit:
+    if not args.limit and not countries:
         cmd = [sys.executable, str(C.ROOT / "student_resource" / "utils" / "validate_submission.py"),
-               "--matching", str(out_dir / "matching_results.tsv"),
-               "--candidate", str(out_dir / "candidate_pairs.tsv"),
+               "--matching", str(out_dir / f"matching_results{sfx}.tsv"),
+               "--candidate", str(out_dir / f"candidate_pairs{sfx}.tsv"),
                "--test-dir", str(C.TEST_DIR)]
         log("running validator ...")
         print(subprocess.run(cmd, capture_output=True, text=True).stdout)
