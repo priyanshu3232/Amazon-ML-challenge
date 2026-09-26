@@ -4,10 +4,18 @@ submission files:
     output/candidate_pairs.tsv     exact candidate set scored by the model
     output/matching_results.tsv    final matches after the decision layer
 
+Memory design (fits a 16 GB laptop for the full 1.7M x 10M test set):
+  * everything is processed one country at a time (blocking, features,
+    stage 2 and the decision layer never need to look across countries);
+  * the two TSVs are streamed from sorted integer arrays, never from Python
+    lists of id strings;
+  * model inference runs on row chunks so LightGBM never sees a huge matrix;
+  * the per-country candidate set is cached in work/cands_cache so a re-score
+    with a retrained model skips the ~75 minute blocking stage.
+
 Usage:
-    python predict.py                      # full test set
-    python predict.py --limit 50000        # smoke test on the first N S1 rows
-                                           # (writes to work/smoke/ instead)
+    python predict.py --tag _v2                 # full test set
+    python predict.py --limit 3000 --tag _v2    # smoke test -> work/smoke/
 """
 import argparse
 import json
@@ -15,17 +23,16 @@ import subprocess
 import sys
 import time
 
-import sparse_dot_topn  # noqa: F401  (must load before lightgbm: two OpenMP runtimes on macOS segfault otherwise)
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
+import sparse_dot_topn  # noqa: F401  (must load before lightgbm: two OpenMP runtimes on macOS segfault otherwise)
+import lightgbm as lgb
 
 import config as C
 import features as FT
 from blocking import block
 from evaluate import decide
-from features import STAGE2_KEEP, add_relational, pair_features, stage2_features
-from io_utils import write_id_list_file
+from features import STAGE2_KEEP, add_relational, pair_features
 
 T0 = time.time()
 KEEP_COLS = ["entity_id", "country", "name_full", "name_core", "name_alias", "is_domain", "addr_norm"]
@@ -48,11 +55,25 @@ def chunk_bounds(q_sorted, target):
         start = end
 
 
-def to_lists(s1_ids, pool_ids, q_idx, p_idx):
-    out = {}
-    order = np.argsort(q_idx, kind="stable")
-    for qi, pi in zip(q_idx[order], p_idx[order]):
-        out.setdefault(s1_ids[qi], []).append(pool_ids[pi])
+def write_groups(fh, q_rows, q_sorted, p_sorted, s1_ids, pool_ids):
+    """Append one line per query in q_rows: '<s1 id>\\t<comma ids>' where the
+    ids are pool_ids[p_sorted] of the rows with q_sorted == that query.
+    q_sorted must be sorted ascending; rows for a query are contiguous."""
+    lo = np.searchsorted(q_sorted, q_rows, side="left")
+    hi = np.searchsorted(q_sorted, q_rows, side="right")
+    lines = []
+    for qi, a, b in zip(q_rows, lo, hi):
+        ids = ",".join(pool_ids[p_sorted[a:b]]) if b > a else ""
+        lines.append(f"{s1_ids[qi]}\t{ids}\n")
+        if len(lines) >= 100_000:
+            fh.writelines(lines); lines = []
+    fh.writelines(lines)
+
+
+def predict_chunks(model, X, cols, chunk=2_000_000):
+    out = np.empty(len(X), np.float32)
+    for a in range(0, len(X), chunk):
+        out[a:a + chunk] = model.predict(X.iloc[a:a + chunk][cols])
     return out
 
 
@@ -60,9 +81,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--tag", default="")
-    ap.add_argument("--chunk", type=int, default=4_000_000)
+    ap.add_argument("--chunk", type=int, default=1_500_000)
     ap.add_argument("--unseen-thr-bump", type=float, default=None,
                     help="threshold increase for countries absent from training")
+    ap.add_argument("--no-cands-cache", action="store_true")
     args = ap.parse_args()
 
     with open(C.WORK_DIR / f"model_meta{args.tag}.json") as fh:
@@ -72,71 +94,96 @@ def main():
     dec = meta["decision"]
     FT.ALONE_FULL = bool(meta.get("alone_full", False))
     bump = args.unseen_thr_bump if args.unseen_thr_bump is not None else meta.get("unseen_thr_bump", 0.0)
-    log(f"decision={dec} use_stage2={meta['use_stage2']} unseen_bump={bump}")
+    train_countries = set(meta.get("train_countries", []))
+    log(f"model{args.tag}: decision={dec} use_stage2={meta['use_stage2']} alone_full={FT.ALONE_FULL} unseen_bump={bump}")
 
     s1 = pd.read_parquet(C.WORK_DIR / "test_s1.parquet", columns=KEEP_COLS)
     pool = pd.read_parquet(C.WORK_DIR / "test_pool.parquet", columns=KEEP_COLS + ["source"])
     out_dir = C.OUTPUT_DIR
-    q_mask = np.ones(len(s1), bool)
+    limit_mask = np.ones(len(s1), bool)
     if args.limit:
-        q_mask[args.limit:] = False
+        limit_mask[args.limit:] = False
         out_dir = C.WORK_DIR / "smoke"
-    s1_ids = s1.entity_id.values
-    pool_ids = pool.entity_id.values
+    out_dir.mkdir(parents=True, exist_ok=True)
+    s1_ids = s1.entity_id.values.astype(object)
+    pool_ids = pool.entity_id.values.astype(object)
     log(f"loaded test: s1={len(s1):,} pool={len(pool):,}")
 
-    cands = block(s1, pool, q_mask=q_mask, log=log, rev_cache=C.WORK_DIR / "rev_cache")
-    cands = cands.sort_values(["q_idx", "p_idx"], kind="stable").reset_index(drop=True)
-    add_relational(cands, cands.q_idx.values, cands.p_idx.values, "sim_full", dims=("q", "p"))
-    log(f"candidates: {len(cands):,} pairs ({len(cands)/max(1, q_mask.sum()):.1f}/query)")
-    write_id_list_file(out_dir / "candidate_pairs.tsv", s1_ids[q_mask],
-                       to_lists(s1_ids, pool_ids, cands.q_idx.values, cands.p_idx.values),
-                       "candidate_entity_ids")
-    log("wrote candidate_pairs.tsv")
+    cache_dir = C.WORK_DIR / "cands_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    f_c = open(out_dir / "candidate_pairs.tsv", "w", encoding="utf-8")
+    f_m = open(out_dir / "matching_results.tsv", "w", encoding="utf-8")
+    f_c.write("source1_entity_id\tcandidate_entity_ids\n")
+    f_m.write("source1_entity_id\tmatched_entity_ids\n")
+    tot_pairs = tot_matches = tot_nonempty = 0
 
-    # ---- stage 1 in query-aligned chunks ----
-    feat_cols = meta["feat_cols"]
-    q_all = cands.q_idx.values
-    parts = []
-    for a, b in chunk_bounds(q_all, args.chunk):
-        sub = cands.iloc[a:b]
-        F = pair_features(sub, s1, pool)
-        p1 = m1.predict(F[feat_cols]).astype(np.float32)
-        tab = sub[["q_idx", "p_idx"]].copy()
-        tab[STAGE2_KEEP] = F[STAGE2_KEEP].values
-        tab["p1"] = p1
-        parts.append(tab)
-        log(f"  scored rows {a:,}-{b:,}")
-    tab = pd.concat(parts, ignore_index=True)
-    del parts
+    for ctry in pd.unique(s1.country.values[limit_mask]):
+        q_mask = limit_mask & (s1.country.values == ctry)
+        q_rows = np.flatnonzero(q_mask)
+        tc = time.time()
+        cache = cache_dir / f"cands_test_{ctry}_{int(q_mask.sum())}_{len(pool)}.parquet"
+        if cache.exists() and not args.no_cands_cache:
+            cands = pd.read_parquet(cache)
+            log(f"[{ctry}] candidates loaded from cache: {len(cands):,} pairs")
+        else:
+            cands = block(s1, pool, q_mask=q_mask, log=log, rev_cache=C.WORK_DIR / "rev_cache")
+            cands = cands.sort_values(["q_idx", "p_idx"], kind="stable").reset_index(drop=True)
+            if not args.no_cands_cache:
+                cands.to_parquet(cache, index=False)
+        q_all = cands.q_idx.values
+        write_groups(f_c, q_rows, q_all, cands.p_idx.values, s1_ids, pool_ids)
+        f_c.flush()
+        tot_pairs += len(cands)
+        log(f"[{ctry}] {len(q_rows):,} entities, {len(cands):,} candidates ({len(cands)/max(1,len(q_rows)):.1f}/entity); candidate lines written")
+        add_relational(cands, q_all, cands.p_idx.values, "sim_full", dims=("q", "p"))
 
-    # ---- stage 2 ----
-    if meta["use_stage2"]:
-        G = stage2_features(tab)
-        prob = m2.predict(G[meta["stage2_cols"]]).astype(np.float32)
-        del G
-    else:
-        prob = tab.p1.values
-    log("stage-2 probabilities ready")
+        # ---- stage 1 in query-aligned chunks ----
+        feat_cols = meta["feat_cols"]
+        tab = cands[["q_idx", "p_idx"]].copy()
+        for col in STAGE2_KEEP:
+            tab[col] = np.zeros(len(tab), np.float32)
+        tab["p1"] = np.zeros(len(tab), np.float32)
+        for a, b in chunk_bounds(q_all, args.chunk):
+            F = pair_features(cands.iloc[a:b], s1, pool)
+            tab.iloc[a:b, tab.columns.get_indexer(STAGE2_KEEP)] = F[STAGE2_KEEP].values.astype(np.float32)
+            tab.iloc[a:b, tab.columns.get_loc("p1")] = m1.predict(F[feat_cols]).astype(np.float32)
+            del F
+            log(f"[{ctry}]   stage-1 scored rows {a:,}-{b:,}")
+        del cands
 
-    # ---- decision layer ----
-    q_idx, p_idx = tab.q_idx.values, tab.p_idx.values
-    thr = np.full(len(tab), dec["thr"], np.float32)
-    if bump:
-        train_countries = set(meta.get("train_countries", []))
-        unseen = ~np.isin(s1.country.values, list(train_countries))
-        thr[unseen[q_idx]] += bump
-        log(f"  unseen-country rows: {int(unseen[q_idx].sum()):,} get thr+{bump}")
-    keep = decide(q_idx, p_idx, prob, 0.0, one_parent=dec["one_parent"], rel_gap=dec["rel_gap"],
-                  min_margin=dec.get("min_margin"))
-    keep &= prob >= thr
-    matches = to_lists(s1_ids, pool_ids, q_idx[keep], p_idx[keep])
-    write_id_list_file(out_dir / "matching_results.tsv", s1_ids[q_mask], matches, "matched_entity_ids")
-    n_nonempty = sum(1 for v in matches.values() if v)
-    log(f"wrote matching_results.tsv: {int(q_mask.sum()):,} rows, {n_nonempty:,} non-empty, "
-        f"{int(keep.sum()):,} matched pairs ({keep.sum()/max(1, q_mask.sum()):.2f}/entity)")
-    pd.DataFrame({"s1": s1_ids[q_idx], "cand": pool_ids[p_idx], "prob": prob, "keep": keep}) \
-        .to_parquet(out_dir / "test_pairs_scored.parquet", index=False)
+        # ---- stage 2 (in place, chunked inference) ----
+        if meta["use_stage2"]:
+            add_relational(tab, tab.q_idx.values, tab.p_idx.values, "p1", dims=("q", "p"))
+            df = pd.DataFrame({"q": tab.q_idx.values, "p1": tab.p1.values})
+            tab["p1_sum_q"] = df.groupby("q")["p1"].transform("sum").values.astype(np.float32)
+            tab["p1_n50_q"] = (df.p1 >= 0.5).groupby(df.q).transform("sum").values.astype(np.int16)
+            tab["p1_n80_q"] = (df.p1 >= 0.8).groupby(df.q).transform("sum").values.astype(np.int16)
+            del df
+            prob = predict_chunks(m2, tab, meta["stage2_cols"])
+        else:
+            prob = tab.p1.values.astype(np.float32)
+        q_idx, p_idx = tab.q_idx.values, tab.p_idx.values
+        log(f"[{ctry}]   stage-2 probabilities ready")
+
+        # ---- decision layer ----
+        thr = dec["thr"] + (bump if (bump and ctry not in train_countries) else 0.0)
+        keep = decide(q_idx, p_idx, prob, thr, one_parent=dec["one_parent"],
+                      rel_gap=dec["rel_gap"], min_margin=dec.get("min_margin"))
+        write_groups(f_m, q_rows, q_idx[keep], p_idx[keep], s1_ids, pool_ids)
+        f_m.flush()
+        n_match = int(keep.sum())
+        n_nonempty = len(np.unique(q_idx[keep]))
+        tot_matches += n_match; tot_nonempty += n_nonempty
+        pd.DataFrame({"q_idx": q_idx, "p_idx": p_idx, "prob": prob, "keep": keep}) \
+            .to_parquet(out_dir / f"scored_{ctry}.parquet", index=False)
+        log(f"[{ctry}] thr={thr:.2f}: {n_match:,} matches, {n_nonempty:,}/{len(q_rows):,} entities non-empty "
+            f"({n_match/max(1,len(q_rows)):.2f}/entity) in {time.time()-tc:.0f}s")
+        del tab, prob, keep, q_idx, p_idx
+
+    f_c.close(); f_m.close()
+    n_ent = int(limit_mask.sum())
+    log(f"done: {n_ent:,} entities, {tot_pairs:,} candidates, {tot_matches:,} matches, "
+        f"{tot_nonempty:,} non-empty ({tot_nonempty/max(1,n_ent):.3f})")
 
     if not args.limit:
         cmd = [sys.executable, str(C.ROOT / "student_resource" / "utils" / "validate_submission.py"),

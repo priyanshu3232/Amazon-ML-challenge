@@ -58,6 +58,23 @@ on the two output files.
 Quick smoke test: `python train.py --n-queries 60000 --tag _dev` then
 `python predict.py --limit 50000 --tag _dev` (writes to `work/smoke/`).
 
+## Running on a bigger machine (recommended for the final model)
+
+Copy this repository (including `student_resource/dataset/`) to the machine, then:
+
+```bash
+python -m venv .venv && source .venv/bin/activate && pip install -r code/business_entity_resolution/requirements.txt
+cd code/business_entity_resolution/src
+python prepare.py --split train && python prepare.py --split test        # ~5 min
+python train.py --n-queries 300000 --tag _v2                             # ~1-2 h on 16+ cores
+python predict.py --tag _v2                                               # ~1 h on 16+ cores
+```
+
+`--n-queries` is the number of Source-1 training entities used to build
+training pairs (all of them are used for the reverse blocking pass). 300k
+needs roughly 40 GB RAM; use 120k on a 32 GB machine. The prediction step
+processes one country at a time and needs about 10 GB.
+
 ## Hardware used
 
 Development on an Apple M5 laptop (16 GB). The full pipeline is CPU-only; a
