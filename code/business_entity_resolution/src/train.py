@@ -23,7 +23,7 @@ import config as C
 import features as FT
 from blocking import block, blocking_recall, per_pass_recall
 from evaluate import breakdown, decide, tune
-from features import STAGE2_KEEP, add_relational, pair_features, stage2_features
+from features import STAGE2_KEEP, add_name_freq, add_relational, pair_features, stage2_features
 from io_utils import read_ground_truth
 
 T0 = time.time()
@@ -69,6 +69,7 @@ def main():
     pool = pd.read_parquet(C.WORK_DIR / "train_pool.parquet", columns=KEEP + ["source"])
     gt = read_ground_truth(C.TRAIN_DIR / "train_ground_truth.tsv")
     log(f"loaded s1={len(s1):,} pool={len(pool):,}")
+    add_name_freq(s1, pool)
 
     # sample of S1 entities for forward blocking / training; val split by entity
     rng = np.random.RandomState(C.SEED)

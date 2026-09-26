@@ -32,7 +32,7 @@ import config as C
 import features as FT
 from blocking import block
 from evaluate import decide
-from features import STAGE2_KEEP, add_relational, pair_features
+from features import STAGE2_KEEP, add_name_freq, add_relational, pair_features
 
 T0 = time.time()
 KEEP_COLS = ["entity_id", "country", "name_full", "name_core", "name_alias", "is_domain", "addr_norm"]
@@ -108,11 +108,12 @@ def main():
     s1_ids = s1.entity_id.values.astype(object)
     pool_ids = pool.entity_id.values.astype(object)
     log(f"loaded test: s1={len(s1):,} pool={len(pool):,}")
+    add_name_freq(s1, pool)
 
     cache_dir = C.WORK_DIR / "cands_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    f_c = open(out_dir / "candidate_pairs.tsv", "w", encoding="utf-8")
-    f_m = open(out_dir / "matching_results.tsv", "w", encoding="utf-8")
+    f_c = open(out_dir / "candidate_pairs.tsv", "w", encoding="utf-8", newline="\n")
+    f_m = open(out_dir / "matching_results.tsv", "w", encoding="utf-8", newline="\n")
     f_c.write("source1_entity_id\tcandidate_entity_ids\n")
     f_m.write("source1_entity_id\tmatched_entity_ids\n")
     tot_pairs = tot_matches = tot_nonempty = 0

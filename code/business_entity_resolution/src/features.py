@@ -79,8 +79,34 @@ def _house_state(n1, n2):
     return 3
 
 
+def add_name_freq(s1: pd.DataFrame, pool: pd.DataFrame) -> None:
+    """Attach per-country name-rarity columns (in place) to the S1 and pool frames.
+
+    nf_s1          how many S1 entities of the same country share this S1's core name
+    nf_s1_in_pool  how many pool records of the same country share this S1's core name
+    nf_pool        how many pool records of the same country share this candidate's core name
+    nf_pool_in_s1  how many S1 entities of the same country share this candidate's core name
+
+    A pool record whose name is unique among S1 entities can only belong to that
+    one entity (matches ~99% on train even with an empty address), whereas a name
+    shared by dozens of entities is almost always a distractor; the pairwise
+    string features cannot see this. Counts are 0 for an empty core name.
+    """
+    if "nf_s1" in s1.columns and "nf_pool" in pool.columns:
+        return
+    k1 = pd.Series(s1.country.values.astype(object) + "\x1f" + s1.name_core.values.astype(object))
+    k2 = pd.Series(pool.country.values.astype(object) + "\x1f" + pool.name_core.values.astype(object))
+    vc1, vc2 = k1.value_counts(), k2.value_counts()
+    e1 = (s1.name_core.values == ""); e2 = (pool.name_core.values == "")
+    s1["nf_s1"] = np.where(e1, 0, k1.map(vc1).fillna(0).values).astype(np.int32)
+    s1["nf_s1_in_pool"] = np.where(e1, 0, k1.map(vc2).fillna(0).values).astype(np.int32)
+    pool["nf_pool"] = np.where(e2, 0, k2.map(vc2).fillna(0).values).astype(np.int32)
+    pool["nf_pool_in_s1"] = np.where(e2, 0, k2.map(vc1).fillna(0).values).astype(np.int32)
+
+
 def pair_features(cands: pd.DataFrame, s1: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
     """Compute features for every row of cands (q_idx, p_idx, sim_*)."""
+    add_name_freq(s1, pool)
     q = cands.q_idx.values
     p = cands.p_idx.values
     F = pd.DataFrame(index=cands.index)
@@ -167,6 +193,16 @@ def pair_features(cands: pd.DataFrame, s1: pd.DataFrame, pool: pd.DataFrame) -> 
             F[col] = cands[col].values
     F["source"] = pool.source.values[p].astype(np.int8)
 
+    # ---- name rarity (see add_name_freq) and exact core-name equality ----
+    F["nf_s1"] = s1.nf_s1.values[q]
+    F["nf_s1_in_pool"] = s1.nf_s1_in_pool.values[q]
+    F["nf_pool"] = pool.nf_pool.values[p]
+    F["nf_pool_in_s1"] = pool.nf_pool_in_s1.values[p]
+    F["core_exact"] = (c1 == c2).astype(np.int8)
+    # rarity given the pair looks like the same name: unique-name exact pairs are near-certain matches
+    F["exact_nf_s1"] = np.where(F.core_exact.values == 1, F.nf_s1.values, -1).astype(np.int32)
+    F["exact_nf_pool_in_s1"] = np.where(F.core_exact.values == 1, F.nf_pool_in_s1.values, -1).astype(np.int32)
+
     # ---- relational features on a heuristic score (within query only; a
     # feature chunk always contains complete query groups) ----
     F["heur"] = (0.5 * F.best_core + 0.3 * F.addr_tset + 20 * F.sim_full).astype(np.float32)
@@ -208,7 +244,8 @@ def add_relational(F: pd.DataFrame, q, p, col: str, dims=("q", "p")) -> None:
 
 STAGE2_KEEP = ["best_core", "core_tset", "name_tset", "addr_tset", "addr_jacc",
                "house_state", "num_shared", "sim_full", "sim_rev", "n_pass", "source",
-               "heur_gap_q", "heur_rank_q", "core_ntok1", "addr_empty2"]
+               "heur_gap_q", "heur_rank_q", "core_ntok1", "addr_empty2",
+               "nf_s1", "nf_pool_in_s1", "core_exact"]
 
 
 def stage2_features(tab: pd.DataFrame) -> pd.DataFrame:
