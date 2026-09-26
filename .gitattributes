@@ -1,0 +1,6 @@
+# Keep LF line endings on every platform so the shell/SLURM scripts run
+# unchanged after a Windows checkout is uploaded to a Linux cluster.
+* text=auto eol=lf
+*.sh text eol=lf
+*.sbatch text eol=lf
+*.py text eol=lf

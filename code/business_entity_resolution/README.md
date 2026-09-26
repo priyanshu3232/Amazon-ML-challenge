@@ -86,3 +86,16 @@ about an hour. No GPU is required.
 No external data, APIs, or services are used. All dictionaries in
 `normalize.py` are static rules (abbreviations, state codes); the
 transliteration dictionary is learned only from `train_ground_truth.tsv`.
+
+## Running from a fresh clone (any OS)
+
+1. `git clone https://github.com/priyanshu3232/Amazon-ML-challenge.git`
+2. Put the organisers' data at `<repo>/student_resource/dataset/{train,test}/`
+   (the dataset is not in git).
+3. Follow the Environment section above, or for PARAM Ganga run
+   `bash code/business_entity_resolution/setup_paramganga.sh` then
+   `sbatch run_paramganga.sbatch` from this folder.
+
+`.gitattributes` forces LF line endings, so a checkout made on Windows can be
+copied to a Linux cluster as is. On Windows use `py -3.12 -m venv .venv` and
+`.\.venv\Scripts\Activate.ps1` in place of the `source` line.
