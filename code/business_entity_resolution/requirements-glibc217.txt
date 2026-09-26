@@ -1,0 +1,10 @@
+# Fallback pins for old Linux (CentOS 7, glibc 2.17) where the main pins have no wheels.
+pandas==2.2.3
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.5.2
+rapidfuzz==3.9.7
+lightgbm==4.5.0
+anyascii==0.3.2
+sparse-dot-topn==1.1.5
+pyarrow==17.0.0
