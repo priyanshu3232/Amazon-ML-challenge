@@ -35,7 +35,9 @@ def main():
         if not args.no_check and (dup or missing):
             sys.exit(f"{stem}: partial files do not cover every Source-1 entity exactly once")
         df = df.set_index("source1_entity_id")
-        df = df.reindex(order[order.isin(df.index)]).reset_index()
+        df = df.reindex(order[order.isin(df.index)].to_numpy())   # original Source-1 order
+        df.index.name = "source1_entity_id"
+        df = df.reset_index()
         df.to_csv(out / f"{stem}.tsv", sep="\t", index=False, quoting=3, lineterminator="\n")
         print(f"  wrote {out / (stem + '.tsv')}")
 
